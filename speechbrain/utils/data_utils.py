@@ -17,7 +17,9 @@ import pathlib
 import re
 import shutil
 import urllib.request
+import ssl
 from numbers import Number
+
 
 import torch
 import tqdm
@@ -304,6 +306,14 @@ def recursive_update(d, u, must_match=False):
             d[k] = v
 
 
+import ssl
+import urllib.request
+import shutil
+import pathlib
+import os
+import tqdm
+import gzip
+
 def download_file(
     source,
     dest,
@@ -315,7 +325,7 @@ def download_file(
     """Downloads the file from the given source and saves it in the given
     destination path.
 
-     Arguments
+    Arguments
     ---------
     source : path or url
         Path of the source file. If the source is an URL, it downloads it from
@@ -325,25 +335,16 @@ def download_file(
     unpack : bool
         If True, it unpacks the data in the dest folder.
         The archive is preserved.
-
-        File formats supported for unpacking/decompression are:
-
-        - any format enumerated by `shutil.get_archive_formats()`, usually
-          including `.tar`, `.tar.gz`, `.zip`.
-        - plain `.gz` file (when not a `.tar` archive)
-
-        Note that you should ALWAYS trust an archive you are extracting, for
-        security reasons.
     dest_unpack: path
-        Path where to store the unpacked dataset
+        Path where to store the unpacked dataset.
     replace_existing : bool
         If True, replaces the existing files.
     write_permissions: bool
-        When set to True, all the files in the dest_unpack directory will be granted write permissions.
+        When set to True, all files in the dest_unpack directory will be granted write permissions.
         This option is active only when unpack=True.
     """
     try:
-        # make sure all processing reached here before main process create dest_dir
+        # Ensure distributed compatibility
         sb.utils.distributed.ddp_barrier()
         if sb.utils.distributed.if_main_process():
 
@@ -359,6 +360,7 @@ def download_file(
             # Create the destination directory if it doesn't exist
             dest_dir = pathlib.Path(dest).resolve().parent
             dest_dir.mkdir(parents=True, exist_ok=True)
+
             if "http" not in source:
                 shutil.copyfile(source, dest)
 
@@ -366,15 +368,20 @@ def download_file(
                 os.path.isfile(dest) and replace_existing
             ):
                 print(f"Downloading {source} to {dest}")
-                with DownloadProgressBar(
-                    unit="B",
-                    unit_scale=True,
-                    miniters=1,
-                    desc=source.split("/")[-1],
-                ) as t:
-                    urllib.request.urlretrieve(
-                        source, filename=dest, reporthook=t.update_to
-                    )
+                ssl_context = ssl._create_unverified_context()
+                with urllib.request.urlopen(source, context=ssl_context) as response, open(dest, 'wb') as out_file:
+                    total_length = int(response.getheader('content-length', 0))
+                    with DownloadProgressBar(
+                        total=total_length,
+                        unit="B",
+                        unit_scale=True,
+                        miniters=1,
+                        desc=source.split("/")[-1],
+                    ) as t:
+                        for data in response:
+                            out_file.write(data)
+                            t.update(len(data))
+
             else:
                 print(f"{dest} exists. Skipping download")
 
@@ -385,8 +392,6 @@ def download_file(
                 print(f"Extracting {dest} to {dest_unpack}")
 
                 if dest.endswith(".gz") and not dest.endswith(".tar.gz"):
-                    # just a gzip'd file, but not an actual archive.
-                    # merely uncompress it and remove the `.gz`.
                     with gzip.open(dest, "rb") as f_in:
                         with open(dest[:-3], "wb") as f_out:
                             shutil.copyfileobj(f_in, f_out)
@@ -398,6 +403,7 @@ def download_file(
 
     finally:
         sb.utils.distributed.ddp_barrier()
+
 
 
 def set_writing_permissions(folder_path):

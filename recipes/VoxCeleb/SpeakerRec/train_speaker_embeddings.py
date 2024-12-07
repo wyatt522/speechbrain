@@ -23,6 +23,7 @@ import torchaudio
 from hyperpyyaml import load_hyperpyyaml
 
 import speechbrain as sb
+
 from speechbrain.utils.data_utils import download_file
 from speechbrain.utils.distributed import run_on_main
 
@@ -109,8 +110,45 @@ class SpeakerBrain(sb.core.Brain):
                 meta={"ErrorRate": stage_stats["ErrorRate"]},
                 min_keys=["ErrorRate"],
             )
+            
+                  
+SAMPLE_RATE = 16000  # Example: Replace with the actual sample rate from hparams
+SENTENCE_LEN = 3.0   # Example: Replace with the actual sentence length from hparams
+RANDOM_CHUNK = True  # Example: Replace with the actual value from hparams
+
+# Updated audio pipeline with explicit values
+@sb.utils.data_pipeline.takes("wav", "start", "stop", "duration")
+@sb.utils.data_pipeline.provides("sig")
+def audio_pipeline(wav, start, stop, duration):
+    snt_len_sample = int(SAMPLE_RATE * SENTENCE_LEN)
+    if RANDOM_CHUNK:
+        duration_sample = int(duration * SAMPLE_RATE)
+        start = random.randint(0, duration_sample - snt_len_sample)
+        stop = start + snt_len_sample
+    else:
+        start = int(start)
+        stop = int(stop)
+    num_frames = stop - start
+    sig, fs = torchaudio.load(
+        wav, num_frames=num_frames, frame_offset=start
+    )
+    sig = sig.transpose(0, 1).squeeze(1)
+    return sig
 
 
+# Refactored label pipeline with closure
+def create_label_pipeline(label_encoder):
+    @sb.utils.data_pipeline.takes("spk_id")
+    @sb.utils.data_pipeline.provides("spk_id", "spk_id_encoded")
+    def label_pipeline(spk_id):
+        yield spk_id
+        spk_id_encoded = label_encoder.encode_sequence_torch([spk_id])
+        yield spk_id_encoded
+    return label_pipeline
+
+
+
+# Modify dataio_prep to directly use these top-level functions
 def dataio_prep(hparams):
     "Creates the datasets and their data processing pipelines."
 
@@ -130,40 +168,11 @@ def dataio_prep(hparams):
     datasets = [train_data, valid_data]
     label_encoder = sb.dataio.encoder.CategoricalEncoder()
 
-    snt_len_sample = int(hparams["sample_rate"] * hparams["sentence_len"])
-
-    # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav", "start", "stop", "duration")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav, start, stop, duration):
-        if hparams["random_chunk"]:
-            duration_sample = int(duration * hparams["sample_rate"])
-            start = random.randint(0, duration_sample - snt_len_sample)
-            stop = start + snt_len_sample
-        else:
-            start = int(start)
-            stop = int(stop)
-        num_frames = stop - start
-        sig, fs = torchaudio.load(
-            wav, num_frames=num_frames, frame_offset=start
-        )
-        sig = sig.transpose(0, 1).squeeze(1)
-        return sig
-
+    # 2. Add dynamic items directly referencing top-level functions
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
-
-    # 3. Define text pipeline:
-    @sb.utils.data_pipeline.takes("spk_id")
-    @sb.utils.data_pipeline.provides("spk_id", "spk_id_encoded")
-    def label_pipeline(spk_id):
-        yield spk_id
-        spk_id_encoded = label_encoder.encode_sequence_torch([spk_id])
-        yield spk_id_encoded
-
-    sb.dataio.dataset.add_dynamic_item(datasets, label_pipeline)
+    sb.dataio.dataset.add_dynamic_item(datasets, create_label_pipeline(label_encoder))
 
     # 3. Fit encoder:
-    # Load or compute the label encoder (with multi-GPU DDP support)
     lab_enc_file = os.path.join(hparams["save_folder"], "label_encoder.txt")
     label_encoder.load_or_create(
         path=lab_enc_file,
@@ -175,6 +184,7 @@ def dataio_prep(hparams):
     sb.dataio.dataset.set_output_keys(datasets, ["id", "sig", "spk_id_encoded"])
 
     return train_data, valid_data, label_encoder
+
 
 
 if __name__ == "__main__":
