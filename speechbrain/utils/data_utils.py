@@ -17,6 +17,7 @@ import pathlib
 import re
 import shutil
 import urllib.request
+import ssl
 from numbers import Number
 
 import torch
@@ -366,15 +367,19 @@ def download_file(
                 os.path.isfile(dest) and replace_existing
             ):
                 print(f"Downloading {source} to {dest}")
-                with DownloadProgressBar(
-                    unit="B",
-                    unit_scale=True,
-                    miniters=1,
-                    desc=source.split("/")[-1],
-                ) as t:
-                    urllib.request.urlretrieve(
-                        source, filename=dest, reporthook=t.update_to
-                    )
+                ssl_context = ssl._create_unverified_context()
+                with urllib.request.urlopen(source, context=ssl_context) as response, open(dest, 'wb') as out_file:
+                    total_length = int(response.getheader('content-length', 0))
+                    with DownloadProgressBar(
+                        total=total_length,
+                        unit="B",
+                        unit_scale=True,
+                        miniters=1,
+                        desc=source.split("/")[-1],
+                    ) as t:
+                        for data in response:
+                            out_file.write(data)
+                            t.update(len(data))
             else:
                 print(f"{dest} exists. Skipping download")
 
